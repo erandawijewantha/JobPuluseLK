@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  # ============ DATABASE ============
+  postgres:
+    image: postgres:15
+    container_name: jobspulse_postgres
+    environment:
+      POSTGRES_DB: jobspulse
+      POSTGRES_USER: etl
+      POSTGRES_PASSWORD: etl123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../sql/schemas:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etl -d jobspulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============ OBJECT STORAGE ============
+  minio:
+    image: minio/minio
+    container_name: jobspulse_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ============ AIRFLOW ============
+  airflow-webserver:
+    image: apache/airflow:2.8.1
+    container_name: jobspulse_airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://etl:etl123@postgres:5432/jobspulse
+      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../src/airflow/dags:/opt/airflow/dags
+      - ../src:/opt/airflow/src
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      bash -c "airflow db init &&
+               airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+               airflow webserver"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1
+    container_name: jobspulse_scheduler
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://etl:etl123@postgres:5432/jobspulse
+      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+    volumes:
+      - ../src/airflow/dags:/opt/airflow/dags
+      - ../src:/opt/airflow/src
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      - airflow-webserver
+    command: airflow scheduler
+
+  # ============ API ============
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    container_name: jobspulse_api
+    environment:
+      - DATABASE_URL=postgresql://etl:etl123@postgres:5432/jobspulse
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  minio_data:
+  airflow_logs:

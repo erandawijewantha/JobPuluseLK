@@ -1,0 +1,22 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/api/**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Railway/Render/Vercel
+        run: |
+          echo "Add your deployment commands here"
+          # Example for Railway:
+          # railway up --service api

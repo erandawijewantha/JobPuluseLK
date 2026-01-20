@@ -1,0 +1,93 @@
+name: Data Processing Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Scrape run ID'
+        required: false
+  workflow_run:
+    workflows: ["Nightly Job Scraping"]
+    types: [completed]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: jobspulse
+          POSTGRES_USER: etl
+          POSTGRES_PASSWORD: etl123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Set up Java (for Spark)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download raw data artifact
+        if: ${{ github.event.inputs.run_id }}
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-data-${{ github.event.inputs.run_id }}
+          path: data/raw/
+
+      - name: Initialize database
+        run: |
+          PGPASSWORD=etl123 psql -h localhost -U etl -d jobspulse -f sql/schemas/001_create_tables.sql
+          PGPASSWORD=etl123 psql -h localhost -U etl -d jobspulse -f sql/views/api_views.sql
+
+      - name: Run Bronze layer
+        run: python -m src.spark.jobs.bronze.ingest_jobs
+
+      - name: Run Silver layer
+        run: python -m src.spark.jobs.silver.transform_jobs
+
+      - name: Run Gold layer
+        run: python -m src.spark.jobs.gold.aggregate_jobs
+
+      - name: Export to PostgreSQL
+        run: python -m src.spark.jobs.export.to_postgres
+        env:
+          DATABASE_URL: postgresql://etl:etl123@localhost:5432/jobspulse
+
+      - name: Run data quality checks
+        run: python -m pytest tests/data_quality/ -v
+
+      - name: Upload processed data
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-data-${{ github.run_id }}
+          path: |
+            data/processed/
+            data/curated/
+          retention-days: 30
